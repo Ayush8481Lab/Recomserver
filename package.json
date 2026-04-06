@@ -1,0 +1,9 @@
+{
+  "name": "ytm-api",
+  "version": "1.0.0",
+  "description": "YouTube Music Recommendations API",
+  "scripts": {
+    "deploy": "npx vercel --prod",
+    "git-push": "git add . && git commit -m \"auto-update\" && git push"
+  }
+}
