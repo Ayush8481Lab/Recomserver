@@ -17,16 +17,18 @@ app.add_middleware(
     allow_headers=["*"],     
 )
 
-# Initialize YouTube Music API
 yt = YTMusic()
 
-# Fake Browser Headers to bypass Vercel/Cloudflare Anti-Bot blocks
+# Fake Browser Headers to bypass Vercel Bot blocks
 BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
     "Connection": "keep-alive"
 }
+
+# --- IMPORTANT: QUEUE LIMITER ---
+# This prevents your custom Spotify API from crashing by only allowing 5 requests at a time.
+spotify_semaphore = asyncio.Semaphore(5)
 
 # ==========================================
 # EXACT & ROBUST SPOTIFY MATCHING LOGIC 
@@ -35,9 +37,7 @@ def clean_string(s: str) -> str:
     if not s:
         return ""
     s = str(s).lower()
-    # Remove non-alphanumeric characters except spaces
     s = re.sub(r'[^\w\s]|_', '', s)
-    # Remove extra spaces
     s = re.sub(r'\s+', ' ', s)
     return s.strip()
 
@@ -47,7 +47,7 @@ def perform_matching(api_data, target_track, target_artist):
         
     tracks =[]
     
-    # Flexible Data Extraction: Handles all JSON wrapper formats
+    # Extract tracks array no matter what JSON structure your API returns
     if isinstance(api_data, list):
         tracks = api_data
     elif isinstance(api_data, dict):
@@ -71,7 +71,6 @@ def perform_matching(api_data, target_track, target_artist):
     best_match = None
     highest_score = 0
     
-    # Matching Logic
     for item in tracks:
         track = item.get('data') if isinstance(item, dict) and 'data' in item else item
         if not track or not isinstance(track, dict):
@@ -83,7 +82,7 @@ def perform_matching(api_data, target_track, target_artist):
         artists_data = track.get('artists', track.get('artist',[]))
         
         if isinstance(artists_data, str):
-            r_artists =[clean_string(a.strip()) for a in artists_data.split(',')]
+            r_artists = [clean_string(a.strip()) for a in artists_data.split(',')]
         elif isinstance(artists_data, dict) and 'items' in artists_data:
             for a in artists_data['items']:
                 if 'profile' in a and 'name' in a['profile']:
@@ -138,22 +137,37 @@ async def fetch_spotify_link(session: httpx.AsyncClient, title: str, artist: str
     url = "https://ayushspot.vercel.app/api"
     
     try:
-        response = await session.get(url, params={"query": query}, timeout=10.0)
+        # TIMEOUT INCREASED TO 45 SECONDS to allow your API to finish processing
+        response = await session.get(url, params={"query": query}, timeout=45.0)
+        
         if response.status_code == 200:
+            # 1. Fallback: If your API returns raw text instead of JSON
+            if "open.spotify.com" in response.text and not response.text.strip().startswith("{") and not response.text.strip().startswith("["):
+                return response.text.strip()
+                
             api_data = response.json()
+            
+            # 2. Fallback: If your API returns a single dictionary with the URL already parsed
+            if isinstance(api_data, dict):
+                for key in ['spotify_url', 'url', 'link', 'spotify', 'external_url']:
+                    if key in api_data and isinstance(api_data[key], str) and 'spotify.com' in api_data[key]:
+                        return api_data[key]
+                if 'id' in api_data and 'name' in api_data and isinstance(api_data['id'], str):
+                    return f"https://open.spotify.com/track/{api_data['id']}"
+
+            # 3. Primary: Perform the exact RapidAPI Array Matching Logic
             match = perform_matching(api_data, title, artist)
             
             if match:
-                # Catch ALL possible variations of how your API might format the URL
-                if 'spotify_url' in match:
-                    return match['spotify_url']
+                if 'id' in match:
+                    return f"https://open.spotify.com/track/{match['id']}"
                 elif 'url' in match and 'spotify.com' in str(match['url']):
                     return match['url']
                 elif 'external_urls' in match and 'spotify' in match['external_urls']:
                     return match['external_urls']['spotify']
-                elif 'id' in match:
-                    return f"https://open.spotify.com/track/{match['id']}"
                     
+    except httpx.TimeoutException:
+        print(f"Spotify Timeout for {query} (Took longer than 45s)")
     except Exception as e:
         print(f"Failed to fetch Spotify data for {query}: {e}")
         
@@ -164,6 +178,7 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, title: str, artist: st
     url = "https://ayushm-psi.vercel.app/api/search/songs"
     
     try:
+        # JioSaavn is fast, so we keep this timeout low
         response = await session.get(url, params={"query": query}, timeout=10.0)
         
         if response.status_code == 200:
@@ -177,7 +192,7 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, title: str, artist: st
                 if not artist_names:
                     artist_names = artist
                 
-                images = top_result.get("image",[])
+                images = top_result.get("image", [])
                 banner_url = images[-1]["url"] if images else ""
                 
                 downloads = top_result.get("downloadUrl",[])
@@ -204,11 +219,14 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, title: str, artist: st
     return None
 
 async def process_song(session: httpx.AsyncClient, yt_title: str, yt_artist: str):
+    # 1. Fetch JioSaavn (Fast - runs instantly)
     jio_data = await fetch_jiosaavn_data(session, yt_title, yt_artist)
     if not jio_data:
         return None
         
-    spotify_link = await fetch_spotify_link(session, jio_data["Title"], jio_data["Artists"])
+    # 2. Fetch Spotify (Slow - Uses Semaphore to Queue up safely)
+    async with spotify_semaphore:
+        spotify_link = await fetch_spotify_link(session, jio_data["Title"], jio_data["Artists"])
     
     jio_data["Spotify Link"] = spotify_link
     return jio_data
@@ -230,12 +248,12 @@ async def get_recommendations(vid: str = Query(..., description="The Video ID of
             artist_name = ", ".join([a['name'] for a in track.get('artists',[]) if 'name' in a])
             yt_search_queries.append((track.get('title'), artist_name))
         
-        # Inject Browser Headers & Follow redirects to bypass Vercel blocks
+        # Inject Browser Headers & Follow redirects to bypass Vercel Blocks
         async with httpx.AsyncClient(headers=BROWSER_HEADERS, follow_redirects=True) as session:
             tasks =[process_song(session, title, artist) for title, artist in yt_search_queries]
             results = await asyncio.gather(*tasks)
         
-        final_recommendations = [res for res in results if res is not None]
+        final_recommendations =[res for res in results if res is not None]
         
         return {"recommendations": final_recommendations}
 
