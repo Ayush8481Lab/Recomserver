@@ -8,13 +8,12 @@ from ytmusicapi import YTMusic
 app = FastAPI()
 
 # --- ENABLE CORS FOR YOUR APP ---
-# This allows your frontend (web/mobile app) to make requests to this API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins. You can change "*" to your app's domain later for security.
-    allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods (GET, POST, etc.)
-    allow_headers=["*"],  # Allows all headers
+    allow_origins=["*"],     # Allows all domains (perfect for testing and public APIs)
+    allow_credentials=False, # MUST BE FALSE when allow_origins is ["*"]
+    allow_methods=["*"],     # Allows all methods (GET, POST)
+    allow_headers=["*"],     # Allows all headers
 )
 
 yt = YTMusic()
@@ -73,7 +72,7 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, title: str, artist: st
         
     return None # Return None if search fails
 
-@app.get("/app/api")
+@app.get("/api")
 async def get_recommendations(vid: str = Query(..., description="The Video ID of the song")):
     try:
         # 1. Get YouTube Music Recommendations
