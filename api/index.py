@@ -6,7 +6,7 @@ app = FastAPI()
 yt = YTMusic()
 
 # Your requested endpoint: /app/api?vid=YOUR_VIDEO_ID
-@app.get("/app/api")
+@app.get("/api")
 def get_recommendations(vid: str = Query(..., description="The Video ID of the song")):
     try:
         # Fetch the auto-generated radio queue for this video ID
