@@ -21,7 +21,7 @@ app.add_middleware(
 yt = YTMusic()
 
 # ==========================================
-# EXACT SPOTIFY MATCHING LOGIC (Translated from JS)
+# EXACT & ROBUST SPOTIFY MATCHING LOGIC 
 # ==========================================
 def clean_string(s: str) -> str:
     if not s:
@@ -34,14 +34,26 @@ def clean_string(s: str) -> str:
     return s.strip()
 
 def perform_matching(api_data, target_track, target_artist):
-    if not api_data or not isinstance(api_data, dict):
+    if not api_data:
         return None
         
-    # Handle both Custom/Standard Spotify API and RapidAPI formats seamlessly
-    tracks = api_data.get('tracks',[])
-    if isinstance(tracks, dict) and 'items' in tracks:
-        tracks = tracks['items']
-        
+    tracks =[]
+    
+    # 1. Flexible Data Extraction: Handles Lists, Dicts, Custom APIs, and Standard Spotify
+    if isinstance(api_data, list):
+        tracks = api_data
+    elif isinstance(api_data, dict):
+        if 'data' in api_data and isinstance(api_data['data'], list):
+            tracks = api_data['data']
+        elif 'results' in api_data and isinstance(api_data['results'], list):
+            tracks = api_data['results']
+        else:
+            tracks_obj = api_data.get('tracks',[])
+            if isinstance(tracks_obj, dict) and 'items' in tracks_obj:
+                tracks = tracks_obj['items']
+            elif isinstance(tracks_obj, list):
+                tracks = tracks_obj
+                
     if not tracks or not isinstance(tracks, list):
         return None
         
@@ -51,18 +63,23 @@ def perform_matching(api_data, target_track, target_artist):
     best_match = None
     highest_score = 0
     
+    # 2. Matching Logic
     for item in tracks:
-        # Check if wrapped in "data" (RapidAPI) or direct (Standard Spotify)
-        track = item.get('data') if 'data' in item else item
-        if not track:
+        # RapidAPI wraps tracks in "data", standard does not
+        track = item.get('data') if isinstance(item, dict) and 'data' in item else item
+        if not track or not isinstance(track, dict):
             continue
             
-        r_title = clean_string(track.get('name', ''))
+        # Support both 'name' and 'title' keys from custom APIs
+        r_title = clean_string(track.get('name', track.get('title', '')))
         
-        # Extract artists robustly
+        # Robustly extract artists whether it's a string, a list of dicts, or nested profiles
         r_artists =[]
-        artists_data = track.get('artists', {})
-        if isinstance(artists_data, dict) and 'items' in artists_data:
+        artists_data = track.get('artists', track.get('artist', []))
+        
+        if isinstance(artists_data, str):
+            r_artists =[clean_string(a.strip()) for a in artists_data.split(',')]
+        elif isinstance(artists_data, dict) and 'items' in artists_data:
             for a in artists_data['items']:
                 if 'profile' in a and 'name' in a['profile']:
                     r_artists.append(clean_string(a['profile']['name']))
@@ -70,10 +87,12 @@ def perform_matching(api_data, target_track, target_artist):
                     r_artists.append(clean_string(a['name']))
         elif isinstance(artists_data, list):
             for a in artists_data:
-                if 'name' in a:
+                if isinstance(a, str):
+                    r_artists.append(clean_string(a))
+                elif isinstance(a, dict) and 'name' in a:
                     r_artists.append(clean_string(a['name']))
                     
-        # Score Calculation exactly like your HTML logic
+        # Calculate Match Score
         score = 0
         artist_matched = False
         
@@ -119,8 +138,18 @@ async def fetch_spotify_link(session: httpx.AsyncClient, title: str, artist: str
         if response.status_code == 200:
             api_data = response.json()
             match = perform_matching(api_data, title, artist)
-            if match and 'id' in match:
-                return f"https://open.spotify.com/track/{match['id']}"
+            
+            if match:
+                # Check for standard 'id'
+                if 'id' in match:
+                    return f"https://open.spotify.com/track/{match['id']}"
+                # Check if custom API directly returned the URL
+                elif 'url' in match and 'spotify.com' in match['url']:
+                    return match['url']
+                # Check for standard Spotify 'external_urls'
+                elif 'external_urls' in match and 'spotify' in match['external_urls']:
+                    return match['external_urls']['spotify']
+                    
     except Exception as e:
         print(f"Failed to fetch Spotify data for {query}: {e}")
         
@@ -138,20 +167,15 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, title: str, artist: st
             if data.get("success") and data.get("data", {}).get("results"):
                 top_result = data["data"]["results"][0]
                 
-                # 1. Title
                 jio_title = top_result.get("name", title)
-                
-                # 2. Artists
-                primary_artists = top_result.get("artists", {}).get("primary",[])
+                primary_artists = top_result.get("artists", {}).get("primary", [])
                 artist_names = ", ".join([a["name"] for a in primary_artists])
                 if not artist_names:
                     artist_names = artist
                 
-                # 3. Banner
                 images = top_result.get("image", [])
                 banner_url = images[-1]["url"] if images else ""
                 
-                # 4. Stream Link
                 downloads = top_result.get("downloadUrl",[])
                 stream_url = ""
                 for d in downloads:
@@ -161,7 +185,6 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, title: str, artist: st
                 if not stream_url and downloads:
                     stream_url = downloads[-1]["url"]
                     
-                # 5. JioSaavn Perma URL
                 perma_url = top_result.get("url", "")
                 
                 return {
@@ -178,15 +201,12 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, title: str, artist: st
 
 # Combined Task Handler for Speed
 async def process_song(session: httpx.AsyncClient, yt_title: str, yt_artist: str):
-    # Step 1: Get JioSaavn Data
     jio_data = await fetch_jiosaavn_data(session, yt_title, yt_artist)
     if not jio_data:
         return None
         
-    # Step 2: Use exact JioSaavn Title/Artist to search Spotify
     spotify_link = await fetch_spotify_link(session, jio_data["Title"], jio_data["Artists"])
     
-    # Step 3: Combine Results
     jio_data["Spotify Link"] = spotify_link
     return jio_data
 
@@ -199,7 +219,7 @@ async def get_recommendations(vid: str = Query(..., description="The Video ID of
     try:
         watch_playlist = yt.get_watch_playlist(videoId=vid, limit=15)
         
-        yt_search_queries =[]
+        yt_search_queries = []
         for track in watch_playlist.get('tracks',[]):
             if track.get('videoId') == vid:
                 continue
@@ -209,9 +229,7 @@ async def get_recommendations(vid: str = Query(..., description="The Video ID of
         
         # Process all songs CONCURRENTLY
         async with httpx.AsyncClient() as session:
-            tasks = [process_song(session, title, artist) for title, artist in yt_search_queries]
-            
-            # This executes JioSaavn -> Spotify for all 15 songs simultaneously
+            tasks =[process_song(session, title, artist) for title, artist in yt_search_queries]
             results = await asyncio.gather(*tasks)
         
         final_recommendations = [res for res in results if res is not None]
