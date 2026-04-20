@@ -17,7 +17,7 @@ app.add_middleware(
 )
 
 # 🔥 FIX: Force YouTube Music to use India ("IN") as the region
-yt = YTMusic(location="IN", language="en")
+yt = YTMusic(location="IN", language="hi")
 
 # Async Helper Function: Fetch details from JioSaavn
 async def fetch_jiosaavn_data(session: httpx.AsyncClient, title: str, artist: str):
