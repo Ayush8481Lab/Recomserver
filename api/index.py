@@ -81,7 +81,7 @@ async def get_recommendations(vid: str = Query(..., description="The Video ID of
         # 🔥 FIX: Explicitly slice the list to a maximum of 15 tracks. 
         # YouTube often returns 25+ items initially regardless of the `limit` parameter.
         # This prevents 25 simultaneous API calls from crashing Vercel's timeout.
-        yt_search_queries = yt_search_queries[:15]
+        yt_search_queries = yt_search_queries[:25]
         
         # Process all JioSaavn requests SIMULTANEOUSLY
         async with httpx.AsyncClient() as session:
