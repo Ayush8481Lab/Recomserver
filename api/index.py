@@ -16,15 +16,21 @@ app.add_middleware(
     allow_headers=["*"],     
 )
 
-
+# Initialize YTMusic (Location will auto-detect from your server IP)
+yt = YTMusic()
 
 # Async Helper Function: Fetch details from JioSaavn
 async def fetch_jiosaavn_data(session: httpx.AsyncClient, title: str, artist: str):
     query = f"{title} {artist}"
-    url = f"https://ayushm-psi.vercel.app/api/search/songs?query={query}"
+    url = "https://ayushm-psi.vercel.app/api/search/songs"
     
     try:
-        response = await session.get(url, timeout=10.0)
+        # Using 'params' securely encodes spaces and special characters
+        response = await session.get(url, params={"query": query}, timeout=15.0)
+        
+        if response.status_code != 200:
+            return None
+            
         data = response.json()
         
         if data.get("success") and data.get("data", {}).get("results"):
@@ -35,7 +41,7 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, title: str, artist: st
             primary_artists = top_result.get("artists", {}).get("primary",[])
             artist_names = ", ".join([a["name"] for a in primary_artists])
             
-            images = top_result.get("image",[])
+            images = top_result.get("image", [])
             banner_url = images[-1]["url"] if images else ""
             
             downloads = top_result.get("downloadUrl",[])
@@ -58,14 +64,15 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, title: str, artist: st
                 "Perma URL": perma_url
             }
     except Exception as e:
-        print(f"Failed to fetch JioSaavn data for {query}: {e}")
+        print(f"Failed to fetch JioSaavn data for '{query}': {e}")
         
     return None 
+
 
 @app.get("/api")
 async def get_recommendations(vid: str = Query(..., description="The Video ID of the song")):
     try:
-        # Get YouTube Music Recommendations (Now localized to India)
+        # Get original YouTube Music Recommendations
         watch_playlist = yt.get_watch_playlist(videoId=vid)
         
         yt_search_queries =[]
@@ -77,17 +84,20 @@ async def get_recommendations(vid: str = Query(..., description="The Video ID of
             artist_name = ", ".join([a['name'] for a in track.get('artists',[]) if 'name' in a])
             yt_search_queries.append((track.get('title'), artist_name))
         
-
-        
         # Process all JioSaavn requests SIMULTANEOUSLY
         async with httpx.AsyncClient() as session:
             tasks =[fetch_jiosaavn_data(session, title, artist) for title, artist in yt_search_queries]
             jiosaavn_results = await asyncio.gather(*tasks)
         
-        # Filter out any None values
-        final_recommendations =[res for res in jiosaavn_results if res is not None]
+        # Filter out any None values (in case a song wasn't found)
+        final_recommendations = [res for res in jiosaavn_results if res is not None]
         
         return {"recommendations": final_recommendations}
 
     except Exception as e:
         return {"error": "Failed to fetch recommendations", "details": str(e)}
+
+# For local testing
+if __name__ == '__main__':
+    import uvicorn
+    uvicorn.run(app, host='0.0.0.0', port=8000)
