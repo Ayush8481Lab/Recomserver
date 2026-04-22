@@ -16,8 +16,7 @@ app.add_middleware(
     allow_headers=["*"],     
 )
 
-# 🔥 FIX: Force YouTube Music to use India ("IN") as the region
-yt = YTMusic(location="IN")
+
 
 # Async Helper Function: Fetch details from JioSaavn
 async def fetch_jiosaavn_data(session: httpx.AsyncClient, title: str, artist: str):
@@ -78,10 +77,7 @@ async def get_recommendations(vid: str = Query(..., description="The Video ID of
             artist_name = ", ".join([a['name'] for a in track.get('artists',[]) if 'name' in a])
             yt_search_queries.append((track.get('title'), artist_name))
         
-        # 🔥 FIX: Explicitly slice the list to a maximum of 15 tracks. 
-        # YouTube often returns 25+ items initially regardless of the `limit` parameter.
-        # This prevents 25 simultaneous API calls from crashing Vercel's timeout.
-        yt_search_queries = yt_search_queries[:25]
+
         
         # Process all JioSaavn requests SIMULTANEOUSLY
         async with httpx.AsyncClient() as session:
