@@ -41,7 +41,7 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, title: str, artist: st
             primary_artists = top_result.get("artists", {}).get("primary",[])
             artist_names = ", ".join([a["name"] for a in primary_artists])
             
-            images = top_result.get("image",[])
+            images = top_result.get("image", [])
             banner_url = images[-1]["url"] if images else ""
             
             downloads = top_result.get("downloadUrl",[])
@@ -72,44 +72,44 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, title: str, artist: st
 @app.get("/api")
 async def get_recommendations(vid: str = Query(..., description="The Video ID of the song")):
     try:
-        # 1. Get original YouTube Music Watch Playlist to find the "Related" browse ID
+        # 1. Get original YouTube Music watch playlist to extract the 'Related' tab browseId
         watch_playlist = yt.get_watch_playlist(videoId=vid)
         related_browse_id = watch_playlist.get('related')
         
-        # Failsafe if YouTube doesn't offer related songs for a very obscure video
+        # If there is no related tab available for this song, return early
         if not related_browse_id:
-            return {"error": "No related songs found for this video"}
-        
-        # 2. Get the actual "Related" tab contents (You might also like, Similar Artists, etc.)
-        related_content = yt.get_song_related(related_browse_id)
+            return {"error": "No related songs found for this video.", "recommendations":[]}
+            
+        # 2. Fetch the actual contents of the "Related" tab
+        related_data = yt.get_song_related(related_browse_id)
         
         yt_search_queries =[]
-        for section in related_content:
-            # We want to extract songs (which have a 'videoId') from these sections
-            for item in section.get('contents',[]):
-                
-                # Skip if it's not a playable song/video (e.g., an Album) or if it's the current song
-                item_vid = item.get('videoId')
-                if not item_vid or item_vid == vid:
+        
+        # 3. 'related_data' returns a list of sections (e.g., "You might also like", "Recommended")
+        for section in related_data:
+            for track in section.get('contents',[]):
+                # Make sure it's a valid track/video
+                if 'videoId' not in track:
                     continue
                 
-                title = item.get('title')
-                artist_name = ", ".join([a['name'] for a in item.get('artists',[]) if 'name' in a])
+                # Skip the currently playing song just in case it appears in the related section
+                if track.get('videoId') == vid:
+                    continue
                 
-                # Add to query list if not already present (Prevents duplicate API calls)
-                query_tuple = (title, artist_name)
-                if query_tuple not in yt_search_queries:
-                    yt_search_queries.append(query_tuple)
+                title = track.get('title', "")
+                artist_name = ", ".join([a['name'] for a in track.get('artists',[]) if 'name' in a])
+                
+                yt_search_queries.append((title, artist_name))
         
-        # Limit the number of concurrent requests to 20 to prevent JioSaavn timeouts
-        yt_search_queries = yt_search_queries[:20] 
-
-        # 3. Process all JioSaavn requests SIMULTANEOUSLY
+        # 4. Remove any duplicate tracks across different sections while preserving the order
+        unique_queries = list(dict.fromkeys(yt_search_queries))
+        
+        # 5. Process all JioSaavn requests SIMULTANEOUSLY
         async with httpx.AsyncClient() as session:
-            tasks =[fetch_jiosaavn_data(session, title, artist) for title, artist in yt_search_queries]
+            tasks =[fetch_jiosaavn_data(session, title, artist) for title, artist in unique_queries]
             jiosaavn_results = await asyncio.gather(*tasks)
         
-        # Filter out any None values (in case a song wasn't found on JioSaavn)
+        # 6. Filter out any None values (in case a song wasn't found)
         final_recommendations =[res for res in jiosaavn_results if res is not None]
         
         return {"recommendations": final_recommendations}
