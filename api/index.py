@@ -20,7 +20,6 @@ app.add_middleware(
 yt = YTMusic()
 
 # --- INTELLIGENCE DATA ---
-# Words that indicate a modified, fake, or promotional track
 FORBIDDEN_KEYWORDS =[
     "remix", "slowed", "reverb", "lofi", "instrumental", "karaoke", 
     "mashup", "acoustic", "unplugged", "cover", "8d", "sped up", 
@@ -30,23 +29,39 @@ FORBIDDEN_KEYWORDS =[
 
 def extract_original_title(yt_title: str) -> str:
     """
-    Cleans the YouTube title to find the base/original song name.
-    e.g. "Thar Remix Dj Leo" -> "Thar"
-    e.g. "Saiyara (Official Video)" -> "Saiyara"
+    Highly intelligent cleaner for YouTube titles.
     """
-    # 1. Remove anything inside parentheses or brackets: (Official Video), [Remix], etc.
-    clean_title = re.sub(r'\(.*?\)|\[.*?\]', '', yt_title)
+    clean_title = yt_title
     
-    # 2. Remove common modifier/DJ words from the remaining text
+    # 1. Transform (Movie: Name) -> (From "Name")
+    # Captures the name inside and reformats it.
+    clean_title = re.sub(r'\(\s*Movie:\s*([^)]+)\)', r'(From "\1")', clean_title, flags=re.IGNORECASE)
+    
+    # 2. Convert standard quotes to &quot; because the search API strictly expects this
+    clean_title = clean_title.replace('"', '&quot;')
+    
+    # 3. Aggressively remove "Remix" and EVERYTHING after it
+    # Matches "remix" and deletes the rest of the string (e.g. "Taras Remix by DJ Notorious" -> "Taras ")
+    clean_title = re.sub(r'(?i)\bremix\b.*', '', clean_title)
+    
+    # 4. Remove anything inside square brackets:[Official Video], [Slowed], etc.
+    clean_title = re.sub(r'\[.*?\]', '', clean_title)
+    
+    # 5. Remove parentheses EXCEPT if they start with "(From "
+    # This protects "(From &quot;Gadar 2&quot;)" but correctly deletes "(Official Video)"
+    clean_title = re.sub(r'\((?!From\b)[^)]*\)', '', clean_title, flags=re.IGNORECASE)
+    
+    # 6. Remove common modifier words from the remaining text
     for kw in FORBIDDEN_KEYWORDS:
-        # \b ensures we only match whole words (e.g., we don't accidentally remove 'mix' from 'mixture')
-        clean_title = re.sub(rf'\b{kw}\b', '', clean_title, flags=re.IGNORECASE)
+        if kw.lower() != 'remix': # Remix is already handled aggressively above
+            clean_title = re.sub(rf'\b{kw}\b', '', clean_title, flags=re.IGNORECASE)
     
-    # 3. Remove "feat." or "ft."
+    # 7. Remove "feat." or "ft."
     clean_title = re.sub(r'\bfeat\.?\b|\bft\.?\b', '', clean_title, flags=re.IGNORECASE)
     
-    # 4. Clean up extra spaces left behind
-    clean_title = re.sub(r'\s+', ' ', clean_title).strip()
+    # 8. Clean up extra spaces and trailing dashes left behind
+    clean_title = re.sub(r'\s+', ' ', clean_title)
+    clean_title = clean_title.strip('- ') # Removes any hanging hyphens
     
     # Fallback to original if our cleaning accidentally removed the whole title
     return clean_title if clean_title else yt_title
@@ -57,7 +72,7 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, yt_title: str, yt_arti
     # Step 1: INTELLIGENTLY CLEAN TITLE BEFORE SEARCHING
     original_title = extract_original_title(yt_title)
     
-    # Query JioSaavn with the cleaned original title
+    # Query JioSaavn with the perfectly cleaned title
     query = f"{original_title} {yt_artist}"
     url = "https://ayushm-psi.vercel.app/api/search/songs"
     
@@ -90,7 +105,7 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, yt_title: str, yt_arti
                     best_result = result
                     break
             
-            # Fallback: If absolutely ALL results have a forbidden word, just grab the first one
+            # Fallback: If absolutely ALL results have a forbidden word, grab the first one
             if not best_result:
                 best_result = results[0]
                 
@@ -117,7 +132,7 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, yt_title: str, yt_arti
             
             return {
                 "Original YT Search": yt_title,
-                "Cleaned Title Searched": original_title, # Added for your debugging!
+                "Cleaned Title Searched": original_title,
                 "Title": jio_title,
                 "Artists": artist_names,
                 "Banner": banner_url,
