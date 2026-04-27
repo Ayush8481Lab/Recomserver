@@ -8,7 +8,7 @@ import re
 # Initialize FastAPI
 app = FastAPI()
 
-# --- ENABLE CORS FOR YOUR APP ---
+# --- ENABLE CORS ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],     
@@ -17,18 +17,48 @@ app.add_middleware(
     allow_headers=["*"],     
 )
 
-# Initialize YTMusic
 yt = YTMusic()
 
-# Keywords that usually indicate a modified track
-MODIFIER_KEYWORDS =[
-    "remix", "slowed", "reverb", "lofi", "instrumental", 
-    "karaoke", "mashup", "acoustic", "unplugged", "cover", "8d", "sped up"
+# --- INTELLIGENCE DATA ---
+# Words that indicate a modified, fake, or promotional track
+FORBIDDEN_KEYWORDS =[
+    "remix", "slowed", "reverb", "lofi", "instrumental", "karaoke", 
+    "mashup", "acoustic", "unplugged", "cover", "8d", "sped up", 
+    "teaser", "trailer", "promo", "dialogue", "reprise", "dj", 
+    "bass boosted", "mix", "edit", "tiktok", "viral"
 ]
+
+def extract_original_title(yt_title: str) -> str:
+    """
+    Cleans the YouTube title to find the base/original song name.
+    e.g. "Thar Remix Dj Leo" -> "Thar"
+    e.g. "Saiyara (Official Video)" -> "Saiyara"
+    """
+    # 1. Remove anything inside parentheses or brackets: (Official Video), [Remix], etc.
+    clean_title = re.sub(r'\(.*?\)|\[.*?\]', '', yt_title)
+    
+    # 2. Remove common modifier/DJ words from the remaining text
+    for kw in FORBIDDEN_KEYWORDS:
+        # \b ensures we only match whole words (e.g., we don't accidentally remove 'mix' from 'mixture')
+        clean_title = re.sub(rf'\b{kw}\b', '', clean_title, flags=re.IGNORECASE)
+    
+    # 3. Remove "feat." or "ft."
+    clean_title = re.sub(r'\bfeat\.?\b|\bft\.?\b', '', clean_title, flags=re.IGNORECASE)
+    
+    # 4. Clean up extra spaces left behind
+    clean_title = re.sub(r'\s+', ' ', clean_title).strip()
+    
+    # Fallback to original if our cleaning accidentally removed the whole title
+    return clean_title if clean_title else yt_title
 
 # Async Helper Function: Fetch details from JioSaavn
 async def fetch_jiosaavn_data(session: httpx.AsyncClient, yt_title: str, yt_artist: str):
-    query = f"{yt_title} {yt_artist}"
+    
+    # Step 1: INTELLIGENTLY CLEAN TITLE BEFORE SEARCHING
+    original_title = extract_original_title(yt_title)
+    
+    # Query JioSaavn with the cleaned original title
+    query = f"{original_title} {yt_artist}"
     url = "https://ayushm-psi.vercel.app/api/search/songs"
     
     try:
@@ -42,36 +72,30 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, yt_title: str, yt_arti
         if data.get("success") and data.get("data", {}).get("results"):
             results = data["data"]["results"]
             
-            # --- SMART MATCHING LOGIC ---
-            yt_title_lower = yt_title.lower()
-            
-            # Find out if the original YouTube song genuinely IS a remix/slowed version
-            allowed_modifiers = [kw for kw in MODIFIER_KEYWORDS if kw in yt_title_lower]
-            
             best_result = None
             
-            # Iterate through results to find a clean match
+            # Step 2: STRICTLY FILTER JIOSAAVN RESULTS
             for result in results:
                 jio_title_lower = result.get("name", "").lower()
                 
                 is_clean = True
-                for kw in MODIFIER_KEYWORDS:
-                    # If the JioSaavn title has a modifier (like "reverb") 
-                    # but the original YT title DID NOT have it, reject this result.
-                    if kw in jio_title_lower and kw not in allowed_modifiers:
+                for kw in FORBIDDEN_KEYWORDS:
+                    # If the JioSaavn title contains "teaser", "remix", "lofi" etc., REJECT IT!
+                    if re.search(rf'\b{kw}\b', jio_title_lower):
                         is_clean = False
                         break
                 
                 if is_clean:
+                    # We found the perfect, unmodified original song!
                     best_result = result
-                    break # Found the perfect clean original track!
+                    break
             
-            # Fallback: If all results are somehow modified, just grab the first one
+            # Fallback: If absolutely ALL results have a forbidden word, just grab the first one
             if not best_result:
                 best_result = results[0]
                 
             # --- EXTRACT DATA FROM THE BEST MATCH ---
-            jio_title = best_result.get("name", yt_title)
+            jio_title = best_result.get("name", original_title)
             
             primary_artists = best_result.get("artists", {}).get("primary",[])
             artist_names = ", ".join([a["name"] for a in primary_artists])
@@ -92,6 +116,8 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, yt_title: str, yt_arti
             perma_url = best_result.get("url", "")
             
             return {
+                "Original YT Search": yt_title,
+                "Cleaned Title Searched": original_title, # Added for your debugging!
                 "Title": jio_title,
                 "Artists": artist_names,
                 "Banner": banner_url,
@@ -107,27 +133,21 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, yt_title: str, yt_arti
 @app.get("/api")
 async def get_recommendations(vid: str = Query(..., description="The Video ID of the song")):
     try:
-        # 1. Get original YouTube Music watch playlist to extract the 'Related' tab browseId
         watch_playlist = yt.get_watch_playlist(videoId=vid)
         related_browse_id = watch_playlist.get('related')
         
-        # If there is no related tab available for this song, return early
         if not related_browse_id:
             return {"error": "No related songs found for this video.", "recommendations":[]}
             
-        # 2. Fetch the actual contents of the "Related" tab
         related_data = yt.get_song_related(related_browse_id)
         
         yt_search_queries =[]
         
-        # 3. Iterate over related sections safely
         for section in related_data:
             for track in section.get('contents',[]):
-                # Make sure it's a valid track
                 if 'videoId' not in track:
                     continue
                 
-                # Skip the currently playing song
                 if track.get('videoId') == vid:
                     continue
                 
@@ -136,15 +156,12 @@ async def get_recommendations(vid: str = Query(..., description="The Video ID of
                 
                 yt_search_queries.append((title, artist_name))
         
-        # 4. Remove any duplicate tracks
         unique_queries = list(dict.fromkeys(yt_search_queries))
         
-        # 5. Process all JioSaavn requests SIMULTANEOUSLY
         async with httpx.AsyncClient() as session:
             tasks =[fetch_jiosaavn_data(session, title, artist) for title, artist in unique_queries]
             jiosaavn_results = await asyncio.gather(*tasks)
         
-        # 6. Filter out any None values 
         final_recommendations =[res for res in jiosaavn_results if res is not None]
         
         return {"recommendations": final_recommendations}
