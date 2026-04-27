@@ -3,6 +3,7 @@ import httpx
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from ytmusicapi import YTMusic
+import re
 
 # Initialize FastAPI
 app = FastAPI()
@@ -16,16 +17,21 @@ app.add_middleware(
     allow_headers=["*"],     
 )
 
-# Initialize YTMusic (Location will auto-detect from your server IP)
+# Initialize YTMusic
 yt = YTMusic()
 
+# Keywords that usually indicate a modified track
+MODIFIER_KEYWORDS =[
+    "remix", "slowed", "reverb", "lofi", "instrumental", 
+    "karaoke", "mashup", "acoustic", "unplugged", "cover", "8d", "sped up"
+]
+
 # Async Helper Function: Fetch details from JioSaavn
-async def fetch_jiosaavn_data(session: httpx.AsyncClient, title: str, artist: str):
-    query = f"{title} {artist}"
+async def fetch_jiosaavn_data(session: httpx.AsyncClient, yt_title: str, yt_artist: str):
+    query = f"{yt_title} {yt_artist}"
     url = "https://ayushm-psi.vercel.app/api/search/songs"
     
     try:
-        # Using 'params' securely encodes spaces and special characters
         response = await session.get(url, params={"query": query}, timeout=15.0)
         
         if response.status_code != 200:
@@ -34,17 +40,46 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, title: str, artist: st
         data = response.json()
         
         if data.get("success") and data.get("data", {}).get("results"):
-            top_result = data["data"]["results"][0]
+            results = data["data"]["results"]
             
-            jio_title = top_result.get("name", title)
+            # --- SMART MATCHING LOGIC ---
+            yt_title_lower = yt_title.lower()
             
-            primary_artists = top_result.get("artists", {}).get("primary",[])
+            # Find out if the original YouTube song genuinely IS a remix/slowed version
+            allowed_modifiers = [kw for kw in MODIFIER_KEYWORDS if kw in yt_title_lower]
+            
+            best_result = None
+            
+            # Iterate through results to find a clean match
+            for result in results:
+                jio_title_lower = result.get("name", "").lower()
+                
+                is_clean = True
+                for kw in MODIFIER_KEYWORDS:
+                    # If the JioSaavn title has a modifier (like "reverb") 
+                    # but the original YT title DID NOT have it, reject this result.
+                    if kw in jio_title_lower and kw not in allowed_modifiers:
+                        is_clean = False
+                        break
+                
+                if is_clean:
+                    best_result = result
+                    break # Found the perfect clean original track!
+            
+            # Fallback: If all results are somehow modified, just grab the first one
+            if not best_result:
+                best_result = results[0]
+                
+            # --- EXTRACT DATA FROM THE BEST MATCH ---
+            jio_title = best_result.get("name", yt_title)
+            
+            primary_artists = best_result.get("artists", {}).get("primary",[])
             artist_names = ", ".join([a["name"] for a in primary_artists])
             
-            images = top_result.get("image", [])
+            images = best_result.get("image", [])
             banner_url = images[-1]["url"] if images else ""
             
-            downloads = top_result.get("downloadUrl",[])
+            downloads = best_result.get("downloadUrl",[])
             stream_url = ""
             for d in downloads:
                 if d.get("quality") == "320kbps":
@@ -54,7 +89,7 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, title: str, artist: st
             if not stream_url and downloads:
                 stream_url = downloads[-1]["url"]
                 
-            perma_url = top_result.get("url", "")
+            perma_url = best_result.get("url", "")
             
             return {
                 "Title": jio_title,
@@ -85,14 +120,14 @@ async def get_recommendations(vid: str = Query(..., description="The Video ID of
         
         yt_search_queries =[]
         
-        # 3. 'related_data' returns a list of sections (e.g., "You might also like", "Recommended")
+        # 3. Iterate over related sections safely
         for section in related_data:
             for track in section.get('contents',[]):
-                # Make sure it's a valid track/video
+                # Make sure it's a valid track
                 if 'videoId' not in track:
                     continue
                 
-                # Skip the currently playing song just in case it appears in the related section
+                # Skip the currently playing song
                 if track.get('videoId') == vid:
                     continue
                 
@@ -101,7 +136,7 @@ async def get_recommendations(vid: str = Query(..., description="The Video ID of
                 
                 yt_search_queries.append((title, artist_name))
         
-        # 4. Remove any duplicate tracks across different sections while preserving the order
+        # 4. Remove any duplicate tracks
         unique_queries = list(dict.fromkeys(yt_search_queries))
         
         # 5. Process all JioSaavn requests SIMULTANEOUSLY
@@ -109,7 +144,7 @@ async def get_recommendations(vid: str = Query(..., description="The Video ID of
             tasks =[fetch_jiosaavn_data(session, title, artist) for title, artist in unique_queries]
             jiosaavn_results = await asyncio.gather(*tasks)
         
-        # 6. Filter out any None values (in case a song wasn't found)
+        # 6. Filter out any None values 
         final_recommendations =[res for res in jiosaavn_results if res is not None]
         
         return {"recommendations": final_recommendations}
