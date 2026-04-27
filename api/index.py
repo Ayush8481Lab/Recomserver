@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from ytmusicapi import YTMusic
 import re
 import urllib.parse
+import html
 
 # Initialize FastAPI
 app = FastAPI()
@@ -69,18 +70,12 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, yt_title: str, yt_arti
     # Step 1: INTELLIGENTLY CLEAN TITLE BEFORE SEARCHING
     original_title = extract_original_title(yt_title)
     
-    # Combine title and artist, then strip trailing/leading spaces
     query_string = f"{original_title} {yt_artist}".strip()
-    
-    # Step 2: EXACT URL ENCODING
-    # This turns spaces into %20, & into %26, ; into %3B, but safely keeps () intact
     encoded_query = urllib.parse.quote(query_string, safe="()")
     
-    # Construct exact URL with &page=1
     url = f"https://ayushm-psi.vercel.app/api/search/songs?query={encoded_query}&page=1"
     
     try:
-        # Pass the pre-formatted URL without httpx params encoding
         response = await session.get(url, timeout=15.0)
         
         if response.status_code != 200:
@@ -91,23 +86,40 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, yt_title: str, yt_arti
         if data.get("success") and data.get("data", {}).get("results"):
             results = data["data"]["results"]
             
-            best_result = None
+            # --- STEP 3: STRICTLY FILTER AND FIND PERFECT MATCH ---
             
-            # Step 3: STRICTLY FILTER JIOSAAVN RESULTS
+            # 3A. Gather all clean tracks (no forbidden keywords)
+            clean_results =[]
             for result in results:
                 jio_title_lower = result.get("name", "").lower()
-                
                 is_clean = True
                 for kw in FORBIDDEN_KEYWORDS:
                     if re.search(rf'\b{kw}\b', jio_title_lower):
                         is_clean = False
                         break
-                
                 if is_clean:
-                    best_result = result
-                    break
+                    clean_results.append(result)
             
-            if not best_result:
+            best_result = None
+            
+            if clean_results:
+                # Normalize target so &quot; becomes " just for matching comparison
+                target_match = html.unescape(original_title).lower().strip()
+                
+                # 3B. Pass 1: Prioritize an EXACT MATCH 
+                for res in clean_results:
+                    # Unescape API response too (just in case they return " or &quot;)
+                    res_name_norm = html.unescape(res.get("name", "")).lower().strip()
+                    
+                    if res_name_norm == target_match:
+                        best_result = res
+                        break
+                
+                # 3C. Pass 2: If no perfect exact match is found, fallback to top clean result
+                if not best_result:
+                    best_result = clean_results[0]
+            else:
+                # Fallback: If absolutely everything had a dirty keyword, grab the very first result
                 best_result = results[0]
                 
             # --- EXTRACT DATA FROM THE BEST MATCH ---
@@ -134,7 +146,7 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, yt_title: str, yt_arti
             return {
                 "Original YT Search": yt_title,
                 "Cleaned Title Searched": original_title,
-                "API Call URL": url, # Added this so you can verify the exact URL being called
+                "API Call URL": url,
                 "Title": jio_title,
                 "Artists": artist_names,
                 "Banner": banner_url,
