@@ -1,5 +1,6 @@
 import asyncio
 import httpx
+from typing import List
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from ytmusicapi import YTMusic
@@ -7,7 +8,7 @@ from ytmusicapi import YTMusic
 # Initialize FastAPI
 app = FastAPI()
 
-# --- ENABLE CORS FOR YOUR APP ---
+# --- ENABLE CORS ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],     
@@ -16,7 +17,7 @@ app.add_middleware(
     allow_headers=["*"],     
 )
 
-# Initialize YTMusic (Location will auto-detect from your server IP)
+# Initialize YTMusic Anonymously
 yt = YTMusic()
 
 # Async Helper Function: Fetch details from JioSaavn
@@ -25,7 +26,6 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, title: str, artist: st
     url = "https://ayushm-psi.vercel.app/api/search/songs"
     
     try:
-        # Using 'params' securely encodes spaces and special characters
         response = await session.get(url, params={"query": query}, timeout=15.0)
         
         if response.status_code != 200:
@@ -38,7 +38,7 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, title: str, artist: st
             
             jio_title = top_result.get("name", title)
             
-            primary_artists = top_result.get("artists", {}).get("primary",[])
+            primary_artists = top_result.get("artists", {}).get("primary", [])
             artist_names = ", ".join([a["name"] for a in primary_artists])
             
             images = top_result.get("image", [])
@@ -69,27 +69,43 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, title: str, artist: st
     return None 
 
 
-@app.get("/api")
-async def get_recommendations(vid: str = Query(..., description="The Video ID of the song")):
+@app.get("/api/personalized")
+async def get_history_based_recommendations(
+    # Accepts multiple vids from the URL string
+    vids: List[str] = Query(..., description="List of recently played Video IDs to simulate history")
+):
     try:
-        # Get original YouTube Music Recommendations
-        watch_playlist = yt.get_watch_playlist(videoId=vid)
+        # SAFETY NET: Limit to the last 20 songs to prevent YouTube payload errors 
+        # and to keep the algorithm's mood detection highly accurate.
+        recent_history_vids = vids[-20:] 
+        
+        # Pass the array to YouTube. It treats this as the current session queue
+        watch_playlist = yt.get_watch_playlist(videoIds=recent_history_vids)
         
         yt_search_queries =[]
         for track in watch_playlist.get('tracks',[]):
-            # Skip the currently playing song
-            if track.get('videoId') == vid:
+            track_vid = track.get('videoId')
+            
+            # Skip if the user has already listened to this song in their history
+            if track_vid in recent_history_vids:
+                continue
+                
+            # Failsafe: Ensure track has a title
+            if not track.get('title'):
                 continue
             
             artist_name = ", ".join([a['name'] for a in track.get('artists',[]) if 'name' in a])
             yt_search_queries.append((track.get('title'), artist_name))
         
-        # Process all JioSaavn requests SIMULTANEOUSLY
+        # Limit to the top 15 recommendations so JioSaavn fetch is super fast
+        yt_search_queries = yt_search_queries[:15]
+        
+        # Process JioSaavn requests SIMULTANEOUSLY
         async with httpx.AsyncClient() as session:
             tasks =[fetch_jiosaavn_data(session, title, artist) for title, artist in yt_search_queries]
             jiosaavn_results = await asyncio.gather(*tasks)
         
-        # Filter out any None values (in case a song wasn't found)
+        # Filter out any songs JioSaavn couldn't find
         final_recommendations = [res for res in jiosaavn_results if res is not None]
         
         return {"recommendations": final_recommendations}
