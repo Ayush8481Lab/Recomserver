@@ -4,6 +4,7 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from ytmusicapi import YTMusic
 import re
+import urllib.parse
 
 # Initialize FastAPI
 app = FastAPI()
@@ -34,26 +35,23 @@ def extract_original_title(yt_title: str) -> str:
     clean_title = yt_title
     
     # 1. Transform (Movie: Name) -> (From "Name")
-    # Captures the name inside and reformats it.
     clean_title = re.sub(r'\(\s*Movie:\s*([^)]+)\)', r'(From "\1")', clean_title, flags=re.IGNORECASE)
     
-    # 2. Convert standard quotes to &quot; because the search API strictly expects this
+    # 2. Convert standard quotes to &quot; 
     clean_title = clean_title.replace('"', '&quot;')
     
     # 3. Aggressively remove "Remix" and EVERYTHING after it
-    # Matches "remix" and deletes the rest of the string (e.g. "Taras Remix by DJ Notorious" -> "Taras ")
     clean_title = re.sub(r'(?i)\bremix\b.*', '', clean_title)
     
-    # 4. Remove anything inside square brackets:[Official Video], [Slowed], etc.
+    # 4. Remove anything inside square brackets
     clean_title = re.sub(r'\[.*?\]', '', clean_title)
     
     # 5. Remove parentheses EXCEPT if they start with "(From "
-    # This protects "(From &quot;Gadar 2&quot;)" but correctly deletes "(Official Video)"
     clean_title = re.sub(r'\((?!From\b)[^)]*\)', '', clean_title, flags=re.IGNORECASE)
     
-    # 6. Remove common modifier words from the remaining text
+    # 6. Remove common modifier words 
     for kw in FORBIDDEN_KEYWORDS:
-        if kw.lower() != 'remix': # Remix is already handled aggressively above
+        if kw.lower() != 'remix': 
             clean_title = re.sub(rf'\b{kw}\b', '', clean_title, flags=re.IGNORECASE)
     
     # 7. Remove "feat." or "ft."
@@ -61,9 +59,8 @@ def extract_original_title(yt_title: str) -> str:
     
     # 8. Clean up extra spaces and trailing dashes left behind
     clean_title = re.sub(r'\s+', ' ', clean_title)
-    clean_title = clean_title.strip('- ') # Removes any hanging hyphens
+    clean_title = clean_title.strip('- ') 
     
-    # Fallback to original if our cleaning accidentally removed the whole title
     return clean_title if clean_title else yt_title
 
 # Async Helper Function: Fetch details from JioSaavn
@@ -72,12 +69,19 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, yt_title: str, yt_arti
     # Step 1: INTELLIGENTLY CLEAN TITLE BEFORE SEARCHING
     original_title = extract_original_title(yt_title)
     
-    # Query JioSaavn with the perfectly cleaned title
-    query = f"{original_title} {yt_artist}"
-    url = "https://ayushm-psi.vercel.app/api/search/songs"
+    # Combine title and artist, then strip trailing/leading spaces
+    query_string = f"{original_title} {yt_artist}".strip()
+    
+    # Step 2: EXACT URL ENCODING
+    # This turns spaces into %20, & into %26, ; into %3B, but safely keeps () intact
+    encoded_query = urllib.parse.quote(query_string, safe="()")
+    
+    # Construct exact URL with &page=1
+    url = f"https://ayushm-psi.vercel.app/api/search/songs?query={encoded_query}&page=1"
     
     try:
-        response = await session.get(url, params={"query": query}, timeout=15.0)
+        # Pass the pre-formatted URL without httpx params encoding
+        response = await session.get(url, timeout=15.0)
         
         if response.status_code != 200:
             return None
@@ -89,23 +93,20 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, yt_title: str, yt_arti
             
             best_result = None
             
-            # Step 2: STRICTLY FILTER JIOSAAVN RESULTS
+            # Step 3: STRICTLY FILTER JIOSAAVN RESULTS
             for result in results:
                 jio_title_lower = result.get("name", "").lower()
                 
                 is_clean = True
                 for kw in FORBIDDEN_KEYWORDS:
-                    # If the JioSaavn title contains "teaser", "remix", "lofi" etc., REJECT IT!
                     if re.search(rf'\b{kw}\b', jio_title_lower):
                         is_clean = False
                         break
                 
                 if is_clean:
-                    # We found the perfect, unmodified original song!
                     best_result = result
                     break
             
-            # Fallback: If absolutely ALL results have a forbidden word, grab the first one
             if not best_result:
                 best_result = results[0]
                 
@@ -115,7 +116,7 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, yt_title: str, yt_arti
             primary_artists = best_result.get("artists", {}).get("primary",[])
             artist_names = ", ".join([a["name"] for a in primary_artists])
             
-            images = best_result.get("image", [])
+            images = best_result.get("image",[])
             banner_url = images[-1]["url"] if images else ""
             
             downloads = best_result.get("downloadUrl",[])
@@ -133,6 +134,7 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, yt_title: str, yt_arti
             return {
                 "Original YT Search": yt_title,
                 "Cleaned Title Searched": original_title,
+                "API Call URL": url, # Added this so you can verify the exact URL being called
                 "Title": jio_title,
                 "Artists": artist_names,
                 "Banner": banner_url,
@@ -140,7 +142,7 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, yt_title: str, yt_arti
                 "Perma URL": perma_url
             }
     except Exception as e:
-        print(f"Failed to fetch JioSaavn data for '{query}': {e}")
+        print(f"Failed to fetch JioSaavn data for '{query_string}': {e}")
         
     return None 
 
