@@ -144,9 +144,7 @@ async def fetch_jiosaavn_data(session: httpx.AsyncClient, yt_title: str, yt_arti
             perma_url = best_result.get("url", "")
             
             return {
-                "Original YT Search": yt_title,
-                "Cleaned Title Searched": original_title,
-                "API Call URL": url,
+            
                 "Title": jio_title,
                 "Artists": artist_names,
                 "Banner": banner_url,
